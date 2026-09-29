@@ -56,15 +56,16 @@ from datetime import datetime, timedelta, timezone
 # The prefix cache stores whole 128-token blocks; a partial block never hits.
 CACHE_BLOCK = 128
 
-# OpenAI public API list prices, USD per 1M tokens, as of 2026-09-23.
+# OpenAI public API list prices, USD per 1M tokens, as of 2026-09-29.
 # Source: https://developers.openai.com/api/docs/pricing
-# Cached input is 10% of input across the GPT-5.x and GPT-6 families.
+# Cached input is 10% of input across the GPT-5.x and GPT-6 families,
+# except GPT-6.1 Sol at 5%, which makes a miss 20x the cached price.
 #
 # Standard tier, short-context rates (<=272K input tokens). Long context
 # doubles input and is 1.5x output, but Codex caps its window at 258,400
 # tokens, so it never gets there.
 #
-# The 5.6 and GPT-6 families also list a cache-write rate (1.25x input).
+# The 5.6, GPT-6 and GPT-6.1 families also list a cache-write rate (1.25x input).
 # It replaces the input rate rather than adding to it, and applies only to
 # tokens written through explicit cache breakpoints. Codex reports
 # cache_write_input_tokens = 0 on every call, so it isn't used here.
@@ -73,6 +74,7 @@ CACHE_BLOCK = 128
 # not pay them — everything derived from this table is a notional
 # "what this usage would have cost on the API" figure, not a bill.
 PRICING = {
+    "gpt-6.1-sol":   {"input":  2.00, "cached": 0.10,  "output": 10.00},
     "gpt-6-astra":   {"input": 10.00, "cached": 1.00,  "output": 50.00},
     "gpt-6-sol":     {"input":  2.00, "cached": 0.20,  "output": 10.00},
     "gpt-6-luna":    {"input":  0.10, "cached": 0.01,  "output":  0.50},
@@ -87,7 +89,7 @@ PRICING = {
     "gpt-5.4":       {"input": 2.50,  "cached": 0.25,  "output": 15.00},
     "gpt-5.3-codex": {"input": 1.75,  "cached": 0.175, "output": 14.00},
 }
-PRICING_AS_OF = "2026-09-23"
+PRICING_AS_OF = "2026-09-29"
 
 
 def price_for(model: str):

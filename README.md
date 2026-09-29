@@ -258,13 +258,14 @@ simply that much more of it.
 
 A miss costs the difference between the full input rate and the cached rate
 — there's no write premium on top. OpenAI now lists a cache-write rate
-(1.25× input) for the 5.6 and GPT-6 families, but it applies only to explicit
+(1.25× input) for the 5.6, GPT-6 and GPT-6.1 families, but it applies only to explicit
 cache breakpoints, which Codex doesn't use. Cached input is 10% of input
 across the GPT-5.x and GPT-6 families, so a miss is 10× the token's cached
-price.
+price. GPT-6.1 Sol is the exception: cached input is 5% of input, so a miss
+there is 20×.
 
 Prices live in the `PRICING` table at the top of the script, list rates as of
-2026-09-23 from [OpenAI's pricing page](https://developers.openai.com/api/docs/pricing).
+2026-09-29 from [OpenAI's pricing page](https://developers.openai.com/api/docs/pricing).
 They're standard-tier, short-context rates. Long context (>272K input)
 costs more, but Codex caps its window at 258,400 tokens. GPT-5.6 Sol's $4.00
 input is a promotional rate guaranteed only through November 21, 2026. Update the
