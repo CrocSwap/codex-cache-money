@@ -93,6 +93,8 @@ you spend effort optimizing your habits.
 python3 cache-money-audit.py                  # last 7 days
 python3 cache-money-audit.py --start 18h      # or 30m, 30d, 2w
 python3 cache-money-audit.py --start 7d --end 1d
+python3 cache-money-audit.py --since-reset   # current primary rate-limit window
+python3 cache-money-audit.py --since-reset secondary # optional second window
 python3 cache-money-audit.py --start 2026-08-01 --end 2026-08-15
 python3 cache-money-audit.py --decay          # hit rate vs. idle gap
 python3 cache-money-audit.py --no-by-project  # skip the per-repo breakdown
@@ -103,6 +105,20 @@ python3 cache-money-audit.py --json           # machine-readable
 `--start` and `--end` each take a lookback from now (`30m`, `18h`, `7d`,
 `2w`) or an ISO date or datetime, read as UTC. `--end` defaults to now.
 `--days N` and `--since DATE` still work, as shorthands for `--start`.
+
+`--since-reset` uses the latest recorded Codex rate-limit snapshot to infer
+the start as `resets_at - window_minutes`, then runs the usual report from
+that time. It defaults to `primary`; use `--since-reset secondary` to select
+the second window if your logs expose one. With `--end`, it uses only
+snapshots recorded at or before that end time. It cannot be combined with
+`--start`, `--days`, or `--since`.
+
+The reset boundary is inferred, not an explicitly recorded previous reset.
+Missing, invalid, or expired snapshots produce an error instead of guessing
+another window; record fresh Codex activity or choose `--start` explicitly.
+Totals cover only the available local session logs, while the limit percentage
+may include activity elsewhere. Text output labels the inferred boundary;
+the normal `--json` report includes its source in `period.reset_window`.
 
 ### By project
 

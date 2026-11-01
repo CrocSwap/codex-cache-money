@@ -31,6 +31,7 @@ below --tolerance are treated as quantization noise rather than evictions.
 Usage:
     python3 cache-money-audit.py                    # last 7 days
     python3 cache-money-audit.py --start 18h        # or 30m, 30d, 2w
+    python3 cache-money-audit.py --since-reset     # current primary limit window
     python3 cache-money-audit.py --start 7d --end 1d
     python3 cache-money-audit.py --start 2026-09-01 --end 2026-09-15
     python3 cache-money-audit.py --decay            # hit-rate decay by idle gap
@@ -261,6 +262,54 @@ def find_rollout_files(root: str):
         print("Is Codex installed and has it recorded any sessions?", file=sys.stderr)
         sys.exit(1)
     return sorted(glob.glob(os.path.join(base, "**", "rollout-*.jsonl"), recursive=True))
+
+
+def reset_window_start(files, until, name):
+    """Infer a window start from the newest snapshot at or before until.
+
+    Read limit-only events too: they need not carry token usage. Never roll
+    an expired snapshot forward, since the next window may start on activity.
+    """
+    latest = None
+    dated_files = []
+    for path in files:
+        try:
+            dated_files.append((os.path.getmtime(path), path))
+        except OSError:
+            continue
+    for mtime, path in sorted(dated_files, reverse=True):
+        if latest is not None and mtime < latest[0].timestamp():
+            break
+        for record in iter_rollout_records(path):
+            payload = record.get("payload") or {}
+            if record.get("type") != "event_msg" or payload.get("type") != "token_count":
+                continue
+            ts = parse_timestamp(record.get("timestamp", ""))
+            if ts is None or ts.tzinfo is None or ts > until:
+                continue
+            limits = payload.get("rate_limits") or {}
+            if limits.get("limit_id") not in (None, "codex"):
+                continue
+            lim = limits.get(name)
+            if lim and (latest is None or ts > latest[0]):
+                latest = (ts, lim)
+    if latest is None:
+        raise ValueError(f"No {name} rate-limit snapshot found at or before the report end.")
+    ts, lim = latest
+    try:
+        minutes = float(lim["window_minutes"])
+        reset = datetime.fromtimestamp(float(lim["resets_at"]), timezone.utc)
+        start = reset - timedelta(minutes=minutes)
+        if not minutes > 0 or start > ts or reset <= ts:
+            raise ValueError
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        raise ValueError(f"Latest {name} snapshot has invalid reset or window data.") from None
+    if reset <= until:
+        raise ValueError(f"Latest {name} snapshot expired at {reset.isoformat()}; "
+                         "record fresh Codex activity or use --start explicitly.")
+    return start, {"limit": name, "snapshot_at": ts.isoformat(),
+                   "resets_at": reset.isoformat(), "window_minutes": minutes,
+                   "inferred": True}
 
 
 def collect_sessions(files, since, until):
@@ -944,6 +993,10 @@ def main():
                         help="Analyze last N days; same as --start Nd (default: 7)")
     window.add_argument("--since", type=str,
                         help="Analyze since date (YYYY-MM-DD); same as --start DATE")
+    window.add_argument("--since-reset", nargs="?", const="primary",
+                        choices=("primary", "secondary"),
+                        help="Infer start from the latest limit reset minus its window "
+                             "(default: primary; optionally secondary)")
     p.add_argument("--end", type=str,
                    help="Window end, in the same forms as --start (default: now)")
     codex_home = os.environ.get("CODEX_HOME") or "~/.codex"
@@ -997,15 +1050,24 @@ def main():
             sys.exit(2)
     since = bounds["--start"]
     until = bounds.get("--end", now)
-    if since >= until:
-        print(f"Window is empty: start {since:%Y-%m-%d %H:%M} is not before "
-              f"end {until:%Y-%m-%d %H:%M} (UTC)", file=sys.stderr)
-        sys.exit(2)
 
     files = find_rollout_files(args.sessions_dir)
     if not files:
         print(f"No rollout files under {args.sessions_dir}", file=sys.stderr)
         sys.exit(1)
+
+    reset_window = None
+    if args.since_reset:
+        try:
+            since, reset_window = reset_window_start(files, until, args.since_reset)
+        except ValueError as e:
+            p.error(str(e))
+        if not args.json:
+            print(f"  Inferred {args.since_reset} window start: {since.isoformat()}")
+            print(f"  Next reset: {reset_window['resets_at']} (local logs only)")
+    if since >= until:
+        p.error(f"Window is empty: start {since:%Y-%m-%d %H:%M} is not before "
+                f"end {until:%Y-%m-%d %H:%M} (UTC)")
 
     sessions = collect_sessions(files, since, until)
     n_calls = sum(len(v) for v in sessions.values())
@@ -1279,6 +1341,8 @@ def main():
                 {**e, "ts": e["ts"].isoformat()}
                 for e in sorted(events, key=lambda x: -x["shortfall"])[:args.top]
             ]
+        if reset_window is not None:
+            out["period"]["reset_window"] = reset_window
         print(json.dumps(out, indent=2, default=str))
         return
 
