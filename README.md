@@ -95,6 +95,7 @@ python3 cache-money-audit.py --start 18h      # or 30m, 30d, 2w
 python3 cache-money-audit.py --start 7d --end 1d
 python3 cache-money-audit.py --since-reset   # current primary rate-limit window
 python3 cache-money-audit.py --since-reset secondary # optional second window
+python3 cache-money-audit.py --previous-reset  # the window before the current one
 python3 cache-money-audit.py --start 2026-08-01 --end 2026-08-15
 python3 cache-money-audit.py --decay          # hit rate vs. idle gap
 python3 cache-money-audit.py --no-by-project  # skip the per-repo breakdown
@@ -119,6 +120,14 @@ another window; record fresh Codex activity or choose `--start` explicitly.
 Totals cover only the available local session logs, while the limit percentage
 may include activity elsewhere. Text output labels the inferred boundary;
 the normal `--json` report includes its source in `period.reset_window`.
+
+`--previous-reset` reports the window before the current one, e.g. last
+week's usage once a new week has started. It finds the newest snapshot
+recorded before the current window began that names a different reset,
+and runs from that window's start to its reset, or to the current window's
+start if the limit reset early. Like `--since-reset`, it takes `primary`
+(default) or `secondary`, honors `--end` as the point that defines
+"current", and errors if no snapshot from the previous window exists.
 
 ### By project
 

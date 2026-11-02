@@ -32,6 +32,7 @@ Usage:
     python3 cache-money-audit.py                    # last 7 days
     python3 cache-money-audit.py --start 18h        # or 30m, 30d, 2w
     python3 cache-money-audit.py --since-reset     # current primary limit window
+    python3 cache-money-audit.py --previous-reset  # the window before that
     python3 cache-money-audit.py --start 7d --end 1d
     python3 cache-money-audit.py --start 2026-09-01 --end 2026-09-15
     python3 cache-money-audit.py --decay            # hit-rate decay by idle gap
@@ -144,11 +145,16 @@ GAP_EDGES = [0, 60, 300, 600, 1200, 1800, 3600, 7200, 21600, 86400, float("inf")
 
 # ─────────────────────────── Parsing ───────────────────────────
 
-def iter_rollout_records(filepath: str):
-    """Yield parsed JSON records from one rollout file, skipping junk lines."""
+def iter_rollout_records(filepath: str, contains=None):
+    """Yield parsed JSON records from one rollout file, skipping junk lines.
+
+    With contains, skip lines lacking that substring before parsing them.
+    """
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
+                if contains is not None and contains not in line:
+                    continue
                 line = line.strip()
                 if not line:
                     continue
@@ -264,11 +270,10 @@ def find_rollout_files(root: str):
     return sorted(glob.glob(os.path.join(base, "**", "rollout-*.jsonl"), recursive=True))
 
 
-def reset_window_start(files, until, name):
-    """Infer a window start from the newest snapshot at or before until.
+def latest_limit_snapshot(files, until, name, accept=None):
+    """Newest (ts, limit) snapshot at or before until that accept() allows.
 
-    Read limit-only events too: they need not carry token usage. Never roll
-    an expired snapshot forward, since the next window may start on activity.
+    Read limit-only events too: they need not carry token usage.
     """
     latest = None
     dated_files = []
@@ -280,7 +285,7 @@ def reset_window_start(files, until, name):
     for mtime, path in sorted(dated_files, reverse=True):
         if latest is not None and mtime < latest[0].timestamp():
             break
-        for record in iter_rollout_records(path):
+        for record in iter_rollout_records(path, contains="rate_limits"):
             payload = record.get("payload") or {}
             if record.get("type") != "event_msg" or payload.get("type") != "token_count":
                 continue
@@ -291,11 +296,15 @@ def reset_window_start(files, until, name):
             if limits.get("limit_id") not in (None, "codex"):
                 continue
             lim = limits.get(name)
-            if lim and (latest is None or ts > latest[0]):
+            if not lim or (latest is not None and ts <= latest[0]):
+                continue
+            if accept is None or accept(ts, lim):
                 latest = (ts, lim)
-    if latest is None:
-        raise ValueError(f"No {name} rate-limit snapshot found at or before the report end.")
-    ts, lim = latest
+    return latest
+
+
+def limit_window(ts, lim, what):
+    """(start, reset, minutes) for a snapshot, or ValueError if inconsistent."""
     try:
         minutes = float(lim["window_minutes"])
         reset = datetime.fromtimestamp(float(lim["resets_at"]), timezone.utc)
@@ -303,13 +312,62 @@ def reset_window_start(files, until, name):
         if not minutes > 0 or start > ts or reset <= ts:
             raise ValueError
     except (KeyError, TypeError, ValueError, OverflowError, OSError):
-        raise ValueError(f"Latest {name} snapshot has invalid reset or window data.") from None
+        raise ValueError(f"{what} snapshot has invalid reset or window data.") from None
+    return start, reset, minutes
+
+
+def reset_window_start(files, until, name):
+    """Infer a window start from the newest snapshot at or before until.
+
+    Never roll an expired snapshot forward, since the next window may start
+    on activity.
+    """
+    latest = latest_limit_snapshot(files, until, name)
+    if latest is None:
+        raise ValueError(f"No {name} rate-limit snapshot found at or before the report end.")
+    ts, lim = latest
+    start, reset, minutes = limit_window(ts, lim, f"Latest {name}")
     if reset <= until:
         raise ValueError(f"Latest {name} snapshot expired at {reset.isoformat()}; "
                          "record fresh Codex activity or use --start explicitly.")
     return start, {"limit": name, "snapshot_at": ts.isoformat(),
                    "resets_at": reset.isoformat(), "window_minutes": minutes,
                    "inferred": True}
+
+
+# resets_at jitters by a minute or so between snapshots of the same window.
+RESET_JITTER = timedelta(minutes=5)
+
+
+def previous_reset_window(files, until, name):
+    """Infer (start, end, source) for the window before the one current at until.
+
+    Uses the newest snapshot taken before the current window began whose reset
+    is distinct from the current one's (beyond jitter). The window ends at its own reset or at
+    the current window's start, whichever is first: limits can reset early.
+    """
+    cur_start, cur = reset_window_start(files, until, name)
+    cur_reset = datetime.fromisoformat(cur["resets_at"])
+
+    def earlier_window(ts, lim):
+        try:
+            reset = datetime.fromtimestamp(float(lim["resets_at"]), timezone.utc)
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            return True  # let limit_window report it as invalid
+        return abs(reset - cur_reset) > RESET_JITTER
+
+    latest = latest_limit_snapshot(files, cur_start, name, earlier_window)
+    if latest is None:
+        raise ValueError(f"No {name} rate-limit snapshot found from before the current "
+                         f"window (started {cur_start.isoformat()}).")
+    ts, lim = latest
+    start, reset, minutes = limit_window(ts, lim, f"Previous {name}")
+    end = min(reset, cur_start)
+    return start, end, {"limit": name, "snapshot_at": ts.isoformat(),
+                        "window_start": start.isoformat(), "resets_at": reset.isoformat(),
+                        "window_minutes": minutes, "ended_at": end.isoformat(),
+                        "early_reset": reset > cur_start,
+                        "next_window_start": cur_start.isoformat(), "inferred": True}
 
 
 def collect_sessions(files, since, until):
@@ -997,6 +1055,10 @@ def main():
                         choices=("primary", "secondary"),
                         help="Infer start from the latest limit reset minus its window "
                              "(default: primary; optionally secondary)")
+    window.add_argument("--previous-reset", nargs="?", const="primary",
+                        choices=("primary", "secondary"),
+                        help="Report the limit window before the current one, from its "
+                             "start to its reset (default: primary; optionally secondary)")
     p.add_argument("--end", type=str,
                    help="Window end, in the same forms as --start (default: now)")
     codex_home = os.environ.get("CODEX_HOME") or "~/.codex"
@@ -1065,6 +1127,17 @@ def main():
         if not args.json:
             print(f"  Inferred {args.since_reset} window start: {since.isoformat()}")
             print(f"  Next reset: {reset_window['resets_at']} (local logs only)")
+    elif args.previous_reset:
+        try:
+            since, until, reset_window = previous_reset_window(
+                files, until, args.previous_reset)
+        except ValueError as e:
+            p.error(str(e))
+        if not args.json:
+            print(f"  Inferred previous {args.previous_reset} window: "
+                  f"{since.isoformat()} -> {until.isoformat()} (local logs only)")
+            if reset_window["early_reset"]:
+                print(f"  Reset early: scheduled for {reset_window['resets_at']}")
     if since >= until:
         p.error(f"Window is empty: start {since:%Y-%m-%d %H:%M} is not before "
                 f"end {until:%Y-%m-%d %H:%M} (UTC)")
